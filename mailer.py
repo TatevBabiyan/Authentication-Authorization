@@ -7,7 +7,7 @@ def send_mail(data: dict | None = None):
     msg = MailBody(**data)
     message = MIMEText(msg.message, "html")
     message["From"] = USERNAME
-    message["To"] = msg.recipient_email  # Change this line
+    message["To"] = msg.recipient_email  
     message["Subject"] = msg.subject
 
     ctx = create_default_context()
