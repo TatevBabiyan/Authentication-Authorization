@@ -1,14 +1,19 @@
+import datetime
 import random
 import string
-from datetime import timedelta
 
+from jose import jwt
+
+from models import User,TokenTable
+from fastapi import FastAPI, Depends, HTTPException,status
+from utils import create_access_token, create_refresh_token, verify_password, get_password_hash, JWT_SECRET_KEY, \
+    ALGORITHM
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Header
 from sqlalchemy.orm import Session
-
+from auth_bearer import JWTBearer
 import crud
 import models
 import schemas
-import utils
 from config import MailBody
 from database import SessionLocal, engine
 from mailer import send_mail
@@ -26,29 +31,52 @@ def get_db():
         db.close()
 
 
-@app.post("/token")
-async def login_for_access_token(request: schemas.RequestDetails, db: Session = Depends(get_db)):
-    user = crud.get_user_by_email(db=db, email=request.email)
-    if not user or not utils.verify_password(request.password, user.password):
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    access_token_expires = timedelta(minutes=utils.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = utils.create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post('/login', response_model=schemas.TokenSchema)
+def login(request: schemas.RequestDetails, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect email or password")
+
+    if not verify_password(request.password, user.password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect email or password")
+
+    access_token = create_access_token(user.id)
+    refresh_token = create_refresh_token(user.id)
+
+    token_db = models.TokenTable(user_id=user.id, access_token=access_token, refresh_token=refresh_token, status=True)
+    db.add(token_db)
+    db.commit()
+    db.refresh(token_db)
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+    }
 
 
-@app.get("/users/me")
-async def read_users_me(authorization: str = Header(...), db: Session = Depends(get_db)):
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Invalid authentication scheme")
-        email = utils.verify_access_token(token, credentials_exception=HTTPException(status_code=401,
-                                                                                     detail="Could not validate credentials"))
-        return {"email": email}
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+
+@app.get('/getusers')
+def getusers(session: Session = Depends(get_db)):
+    user = session.query(models.User).all()
+    return user
+
+
+@app.post('/change-password')
+def change_password(request: schemas.changepassword, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User not found")
+
+    if not verify_password(request.old_password, user.password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid old password")
+
+    encrypted_password = get_password_hash(request.new_password)
+    user.password = encrypted_password
+    db.commit()
+
+    return {"message": "Password changed successfully"}
+
 
 
 @app.post("/register")
@@ -72,3 +100,27 @@ def verify_email(user: schemas.VerificationCreate, db: Session = Depends(get_db)
 @app.get("/getusers")
 def get_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return crud.get_all_users(skip=skip, limit=limit, db=db)
+
+
+
+
+@app.post('/logout')
+def logout(token: str = Depends(JWTBearer()), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload['sub']
+
+        # Delete tokens older than 1 day
+        db.query(models.TokenTable).filter((datetime.datetime.utcnow() - models.TokenTable.created_date) > datetime.timedelta(days=1)).delete()
+
+        # Invalidate current token
+        token_record = db.query(models.TokenTable).filter(models.TokenTable.access_token == token).first()
+        if token_record:
+            token_record.status = False
+            db.commit()
+
+        return {"message": "Logout Successful"}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
