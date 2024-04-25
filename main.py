@@ -101,26 +101,3 @@ def verify_email(user: schemas.VerificationCreate, db: Session = Depends(get_db)
 def get_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return crud.get_all_users(skip=skip, limit=limit, db=db)
 
-
-
-
-@app.post('/logout')
-def logout(token: str = Depends(JWTBearer()), db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload['sub']
-
-        # Delete tokens older than 1 day
-        db.query(models.TokenTable).filter((datetime.datetime.utcnow() - models.TokenTable.created_date) > datetime.timedelta(days=1)).delete()
-
-        # Invalidate current token
-        token_record = db.query(models.TokenTable).filter(models.TokenTable.access_token == token).first()
-        if token_record:
-            token_record.status = False
-            db.commit()
-
-        return {"message": "Logout Successful"}
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
